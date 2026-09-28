@@ -1,0 +1,17 @@
+# Private denylist for scripts/check_leak.py
+#
+# Copy this file to `.leakcheck-local.txt` and add concrete terms that must
+# never appear in a public commit: employer-specific system names, project
+# codenames, internal service identifiers, real names, employee ids, and so on.
+#
+# `.leakcheck-local.txt` is gitignored and must stay that way. A committed list
+# of the words you are trying to hide discloses exactly what you meant to hide.
+#
+# One term per line. Matching is case-insensitive and literal (not a regex).
+# Lines starting with `#` are comments.
+#
+# Example entries -- replace with your own:
+#
+# MyEmployerInternalSystemName
+# project-codename
+# some-internal-service-id

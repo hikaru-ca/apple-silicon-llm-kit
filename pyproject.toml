@@ -1,0 +1,31 @@
+[project]
+name = "apple-silicon-llm-kit"
+version = "0.1.0"
+description = "Reproducible MLX toolkit for running and fine-tuning open LLMs on Apple silicon"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+
+# Versions are pinned exactly (== only). No ranges, no `latest`.
+# Every pin is a stable release that was at least 3 days old when added.
+dependencies = [
+    "mlx==0.32.2",      # released 2026-08-25
+    "mlx-lm==0.31.3",   # released 2026-04-22
+    "mlx-vlm==0.7.1",   # released 2026-09-14
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.16.8",     # released 2026-09-16
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv]
+# Keep resolution reproducible across machines.
+package = false

@@ -1,0 +1,42 @@
+# --- Model weights & training artifacts (large, never commit) ---
+models/**
+!models/.gitkeep
+adapters/**
+!adapters/.gitkeep
+
+# --- Datasets (may contain private data, never commit) ---
+data/**
+!data/.gitkeep
+!data/README.md
+
+# --- Local-only leak-check denylist (contains private terms by design) ---
+.leakcheck-local.txt
+
+# --- Agent / editor local config ---
+CLAUDE.md
+.claude/
+.cursor/
+.vscode/
+.idea/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# --- macOS ---
+.DS_Store

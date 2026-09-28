@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Lint and privacy scan. Cheap, runs on Linux.
+  static:
+    name: Lint + leak check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      # mlx has no Linux wheels, so install only the dev tooling here.
+      - name: Install lint tooling
+        run: uv tool install ruff==0.16.8
+
+      - name: Lint
+        run: |
+          uvx ruff==0.16.8 check .
+          uvx ruff==0.16.8 format --check .
+
+      # Runs the committed generic patterns only. The private denylist is
+      # gitignored and therefore absent here by design.
+      - name: Leak check
+        run: python3 scripts/check_leak.py
+
+      - name: Verify dependency pins are exact
+        run: python3 scripts/check_pins.py
+
+  # Real resolution and import test. Needs Apple silicon.
+  build:
+    name: Build on Apple silicon
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      # --locked fails if uv.lock is out of sync with pyproject.toml.
+      - name: Install pinned dependencies
+        run: uv sync --extra dev --locked
+
+      - name: Smoke test MLX on the GPU
+        run: uv run python scripts/doctor.py

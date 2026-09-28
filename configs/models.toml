@@ -1,0 +1,50 @@
+# Model registry.
+#
+# Every id below was verified to exist on the Hugging Face Hub under the
+# `mlx-community` organization. `mem_gb` is the approximate resident size of the
+# weights alone -- add KV cache on top, which grows with context length.
+#
+# Reference machine for the `tok_s` estimates: Apple M4 Max, 40-core GPU,
+# 64 GB unified memory (~546 GB/s). Treat them as order-of-magnitude only.
+
+[models.e2b]
+id = "mlx-community/gemma-4-e2b-it-4bit"
+mem_gb = 2.5
+tok_s = "120+"
+note = "Smallest. Good for smoke tests and throughput experiments."
+
+[models.e4b]
+id = "mlx-community/gemma-4-E4B-it-OBLITERATED-mlx-8Bit"
+mem_gb = 9.0
+tok_s = "60-80"
+note = "8-bit E4B. Community fine-tune, not an official Google build."
+
+[models."12b"]
+id = "mlx-community/gemma-4-12B-it-4bit"
+mem_gb = 8.0
+tok_s = "45-60"
+note = "Everyday default. Comfortable headroom for LoRA training."
+
+[models."12b-qat"]
+id = "mlx-community/gemma-4-12B-it-qat-OptiQ-4bit"
+mem_gb = 8.0
+tok_s = "45-60"
+note = "Quantization-aware trained. Better quality than plain 4-bit at equal size."
+
+[models."26b-moe"]
+id = "mlx-community/gemma-4-26b-a4b-it-4bit"
+mem_gb = 16.0
+tok_s = "50-80"
+note = "MoE, ~4B active params per token. All 26B must be resident in memory."
+
+[models."31b"]
+id = "mlx-community/gemma-4-31b-4bit"
+mem_gb = 19.0
+tok_s = "18-25"
+note = "Flagship dense model. Highest quality that still runs at usable speed."
+
+[models."31b-qat"]
+id = "mlx-community/gemma-4-31B-it-qat-OptiQ-4bit"
+mem_gb = 19.0
+tok_s = "18-25"
+note = "Quantization-aware trained 31B. Preferred over plain 4-bit when available."
