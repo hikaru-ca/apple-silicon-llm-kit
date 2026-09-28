@@ -7,6 +7,26 @@ PROMPT      ?= Explain unified memory on Apple silicon in two sentences.
 MAX_TOKENS  ?= 512
 PORT        ?= 8080
 
+# Thinking mode. Off by default: it costs several times the tokens and adds no
+# quality on summarization, translation, extraction or classification. Turn it
+# on for multi-step reasoning, and raise MAX_TOKENS when you do -- the reasoning
+# is spent out of the same budget as the answer, so a short reply can still be
+# truncated before it starts.
+#
+# Measured on Gemma 4 E2B, identical prompt, temp 0:
+#   THINK=off   47 tokens
+#   THINK=on   309 tokens   (6.6x, same answer)
+#
+# The two CLIs spell this differently, which is easy to trip over:
+# mlx_lm.generate takes --chat-template-config, mlx_lm.server takes
+# --chat-template-args.
+THINK       ?= off
+ifeq ($(THINK),on)
+  THINK_JSON := {"enable_thinking":true}
+else
+  THINK_JSON := {"enable_thinking":false}
+endif
+
 # Training defaults sized for a 64 GB machine.
 DATA        ?= data/lora
 ADAPTER     ?= adapters/$(MODEL)
@@ -42,16 +62,30 @@ pull: ## Download a model into the local HF cache
 	$(RUN) python scripts/pull.py $(MODEL)
 
 .PHONY: gen
-gen: ## One-shot generation: make gen MODEL=31b PROMPT="..."
+gen: ## One-shot generation: make gen MODEL=31b PROMPT="..." [THINK=on]
 	$(RUN) mlx_lm.generate \
 		--model $(MODEL_ID) \
 		--prompt "$(PROMPT)" \
-		--max-tokens $(MAX_TOKENS)
+		--max-tokens $(MAX_TOKENS) \
+		--chat-template-config '$(THINK_JSON)'
 
 .PHONY: serve
 serve: ## Start an OpenAI-compatible server on localhost
-	@echo "Serving $(MODEL_ID) at http://127.0.0.1:$(PORT)/v1 (local only)"
-	$(RUN) mlx_lm.server --model $(MODEL_ID) --port $(PORT)
+	@echo "Serving $(MODEL_ID) at http://127.0.0.1:$(PORT)/v1 (local only, THINK=$(THINK))"
+	$(RUN) mlx_lm.server \
+		--model $(MODEL_ID) \
+		--port $(PORT) \
+		--chat-template-args '$(THINK_JSON)'
+
+.PHONY: serve-auth
+serve-auth: ## Bearer-token proxy in front of the server: make serve-auth LISTEN=0.0.0.0:8443
+	@test -n "$$MLX_API_TOKEN" || { \
+		echo "error: MLX_API_TOKEN is not set."; \
+		echo "  cp .env.example .env, generate a token, then:  set -a; . ./.env; set +a"; \
+		exit 1; }
+	$(RUN) python scripts/auth_proxy.py \
+		--listen $(or $(LISTEN),127.0.0.1:8443) \
+		--upstream 127.0.0.1:$(PORT)
 
 .PHONY: convert
 convert: ## Quantize an arbitrary HF model: make convert HF=org/model QBITS=4
@@ -81,7 +115,8 @@ lora-test: ## Generate using a trained adapter
 		--model $(MODEL_ID) \
 		--adapter-path $(ADAPTER) \
 		--prompt "$(PROMPT)" \
-		--max-tokens $(MAX_TOKENS)
+		--max-tokens $(MAX_TOKENS) \
+		--chat-template-config '$(THINK_JSON)'
 
 .PHONY: lora-fuse
 lora-fuse: ## Fuse the adapter into the base weights as a standalone model

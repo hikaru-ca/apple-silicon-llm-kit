@@ -71,8 +71,72 @@ make serve MODEL=12b PORT=8080
 ```
 
 This exposes an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, which any
-OpenAI client can use by overriding its base URL. It binds to loopback; do not
-expose it to a network without adding authentication.
+OpenAI client can use by overriding its base URL.
+
+### Authentication
+
+`mlx_lm.server` has no authentication of any kind — no tokens, no accounts, no
+flags. Its only protection is the default bind address of `127.0.0.1`, which
+keeps it unreachable from the network. That default is doing all of the work:
+`--host 0.0.0.0` publishes an open model endpoint to everyone on the LAN.
+
+So on loopback, nothing more is needed. To reach it from another device, put the
+bundled proxy in front instead of moving the server off loopback:
+
+```bash
+cp .env.example .env                                  # then generate a token
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+set -a; . ./.env; set +a
+
+make serve                                            # stays on 127.0.0.1:8080
+make serve-auth LISTEN=0.0.0.0:8443                   # authenticated, in another shell
+```
+
+Clients then send `Authorization: Bearer <token>` (or `x-api-key`, for
+Anthropic-style clients). Requests without a valid credential get a 401.
+Streaming passes through chunk by chunk, so token-by-token output still works.
+
+The proxy is standard library only — an authentication component is the last
+place to add dependencies. Its limits are deliberate and worth stating plainly:
+the token is sent in plaintext, so this is for a trusted LAN rather than the
+internet; there is one shared token rather than per-user accounts; and there is
+no rate limiting. For anything more exposed, terminate TLS in front of it.
+
+## Thinking mode
+
+Gemma 4 can emit its reasoning into a separate `thought` channel before
+answering. Those reasoning tokens are generated like any others: they cost time,
+and they are drawn from the same `--max-tokens` budget as the answer. A request
+with too small a budget can spend all of it thinking and return no answer at
+all.
+
+`THINK` controls it, and defaults to `off`:
+
+```bash
+make gen MODEL=12b PROMPT="..."            # thinking off
+make gen MODEL=12b PROMPT="..." THINK=on MAX_TOKENS=1500
+```
+
+Measured on Gemma 4 E2B, identical prompt, `temp 0`:
+
+| | Tokens | Time | Answer |
+|---|---|---|---|
+| `THINK=off` | 47 | 0.4 s | correct |
+| `THINK=on` | 309 | 1.8 s | correct |
+
+Six and a half times the tokens for the same answer — because this prompt needs
+no reasoning. Thinking pays for itself on multi-step problems (arithmetic,
+constraint satisfaction, debugging, planning) and is close to pure overhead on
+summarization, translation, extraction, classification and formatting.
+
+For batch work the difference compounds: 6x tokens on ten thousand records is
+the difference between an afternoon and a day. Leave it off unless a specific
+task measurably improves with it.
+
+One inconsistency worth knowing, since the flags are not named alike:
+`mlx_lm.generate` takes `--chat-template-config`, while `mlx_lm.server` takes
+`--chat-template-args`. Both accept `{"enable_thinking": true|false}`. The
+`THINK` variable hides this.
 
 ## Fine-tuning
 
