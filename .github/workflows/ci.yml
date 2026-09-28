@@ -57,5 +57,9 @@ jobs:
       - name: Install pinned dependencies
         run: uv sync --extra dev --locked
 
-      - name: Smoke test MLX on the GPU
+      # Hosted runners are virtualized and may expose no usable GPU, so a Metal
+      # failure warns here instead of failing. On a real machine it still fails.
+      - name: Smoke test MLX
+        env:
+          ALLOW_NO_GPU: "1"
         run: uv run python scripts/doctor.py

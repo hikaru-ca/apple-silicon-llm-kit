@@ -29,3 +29,16 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.uv]
 # Keep resolution reproducible across machines.
 package = false
+
+# Supply chain quarantine: refuse any distribution published after this instant,
+# transitive dependencies included. A freshly compromised or yanked release
+# therefore cannot enter the build until someone deliberately moves this date.
+#
+# This must be an absolute timestamp rather than a relative window such as
+# "1 week". A relative window slides forward every day, so the resolution drifts
+# and `uv sync --locked` eventually fails in CI for no real reason. It also must
+# live here rather than in a developer's ~/.config/uv/uv.toml, or CI resolves
+# without the constraint and the lockfile stops matching.
+#
+# To take updates: raise this date, run `uv lock`, and commit the new lockfile.
+exclude-newer = "2026-09-21T00:00:00Z"

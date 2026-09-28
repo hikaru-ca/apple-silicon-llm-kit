@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 import sys
@@ -69,9 +70,24 @@ def main() -> int:
         print("\nFAIL  mlx is not installed. Run `make setup`.")
         return 1
 
-    # Touch the GPU to confirm Metal actually works, not just that the import resolved.
-    probe = (mx.ones((256, 256)) @ mx.ones((256, 256))).sum()
-    mx.eval(probe)
+    # Touch the GPU to confirm Metal actually works, not just that the import
+    # resolved. Hosted CI runners are virtualized and may have no usable GPU, so
+    # ALLOW_NO_GPU downgrades that to a warning there without weakening the
+    # check on a real machine.
+    try:
+        probe = (mx.ones((256, 256)) @ mx.ones((256, 256))).sum()
+        mx.eval(probe)
+    except Exception as exc:  # noqa: BLE001 - any Metal failure is equally fatal here
+        if os.environ.get("ALLOW_NO_GPU") == "1":
+            print(f"  mlx         {mx.__version__} (WARN: no usable GPU: {exc})")
+            return 0
+        print(f"\nFAIL  mlx {mx.__version__} imported but Metal is unusable: {exc}")
+        return 1
+
+    expected = 256**3
+    if probe.item() != expected:
+        print(f"\nFAIL  Metal probe returned {probe.item():.0f}, expected {expected}.")
+        return 1
     print(f"  mlx         {mx.__version__} (Metal probe OK, result={probe.item():.0f})")
 
     print("\nModel fit  (weights only; KV cache grows on top with context length)")
