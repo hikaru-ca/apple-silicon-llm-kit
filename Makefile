@@ -2,7 +2,9 @@
 SHELL := /bin/bash
 
 # ---- Tunables (override on the command line, e.g. `make gen MODEL=31b`) ----
-MODEL       ?= 12b
+# 26b-moe, not 12b: the 12B Unified architecture needs mlx-vlm, which
+# mlx_lm.server cannot load. See configs/models.toml.
+MODEL       ?= 26b-moe
 PROMPT      ?= Explain unified memory on Apple silicon in two sentences.
 MAX_TOKENS  ?= 512
 PORT        ?= 8080
@@ -76,6 +78,34 @@ serve: ## Start an OpenAI-compatible server on localhost
 		--model $(MODEL_ID) \
 		--port $(PORT) \
 		--chat-template-args '$(THINK_JSON)'
+
+.PHONY: up
+up: ## Launch the stack: make up MODEL=12b [THINK=on] [EXPOSE=lan] [AUTH=1] [UI=0]
+	$(RUN) python scripts/launch.py \
+		--model $(MODEL) \
+		--think $(THINK) \
+		--max-tokens $(MAX_TOKENS) \
+		--expose $(or $(EXPOSE),loopback) \
+		--port $(PORT) \
+		$(if $(AUTH),--auth,--no-auth) \
+		$(if $(filter 0,$(UI)),--no-ui,--ui)
+
+.PHONY: down
+down: ## Stop a running stack and wait for its ports to be released
+	@pkill -f "scripts/launch.py|scripts/auth_proxy.py|mlx_lm.server" 2>/dev/null || true
+	@# A terminated launcher gives its children up to 10s to exit, so the ports
+	@# stay bound for a moment. Returning before they are free makes an
+	@# immediately following `make up` fail on a stack that is already gone.
+	@for i in $$(seq 1 20); do \
+		if ! lsof -nP -iTCP:$(PORT),$(or $(UI_PORT),8443) -sTCP:LISTEN >/dev/null 2>&1; then \
+			echo "Stopped."; exit 0; \
+		fi; \
+		sleep 0.5; \
+	done; \
+	echo "warning: ports still bound after 10s; check with: lsof -nP -iTCP:$(PORT) -sTCP:LISTEN"
+
+.PHONY: restart
+restart: down up ## Stop whatever is running, then launch: make restart MODEL=31b-qat
 
 .PHONY: serve-auth
 serve-auth: ## Bearer-token proxy in front of the server: make serve-auth LISTEN=0.0.0.0:8443

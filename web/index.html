@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Local LLM</title>
+<!--
+  Deliberately self-contained: no CDN fonts, no external scripts, no analytics.
+  The entire point of running the model locally is that nothing leaves the
+  machine, and a page that phones out for a stylesheet quietly breaks that.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b68;
+    --line: #e4e4e1; --accent: #2f6f4e; --user-bg: #eef2ef; --warn: #8a5a00;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --panel: #1e2022; --ink: #e8e8e6; --muted: #9a9a96;
+      --line: #2e3134; --accent: #6fbf8f; --user-bg: #262a2c; --warn: #d6a44a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    display: flex; flex-direction: column; height: 100dvh;
+  }
+  header {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  .spacer { flex: 1; }
+  label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+  select, input[type=text], input[type=password], input[type=number] {
+    font: inherit; font-size: 13px; padding: 4px 7px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  #log { flex: 1; overflow-y: auto; padding: 20px 16px 8px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .msg { margin-bottom: 18px; }
+  .who { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 5px; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user .body { background: var(--user-bg); padding: 10px 13px; border-radius: 10px; }
+  details.think {
+    margin-bottom: 9px; border-left: 2px solid var(--line); padding-left: 11px;
+  }
+  details.think summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+  details.think .body { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .meta { font-size: 11px; color: var(--muted); margin-top: 7px; font-family: var(--mono); }
+  .err { color: var(--warn); }
+  footer {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+  form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+  textarea {
+    flex: 1; font: inherit; resize: none; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+    min-height: 44px; max-height: 190px;
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 17px; border: 0; border-radius: 9px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 400; padding: 5px 10px; font-size: 12px; }
+  .hint { max-width: 760px; margin: 7px auto 0; font-size: 11px; color: var(--muted); }
+  @media (max-width: 620px) { .spacer { display: none; } header { gap: 9px; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Local LLM</h1>
+  <label>model
+    <select id="model"></select>
+  </label>
+  <label title="Reasoning tokens come out of the same budget as the answer.">
+    <input type="checkbox" id="think"> think
+  </label>
+  <label>max tokens
+    <input type="number" id="maxTokens" value="800" min="32" max="8192" step="32" style="width:74px">
+  </label>
+  <span class="spacer"></span>
+  <button class="ghost" id="clear" type="button">clear</button>
+</header>
+
+<div id="log"><div class="wrap" id="wrap"></div></div>
+
+<footer>
+  <form id="form">
+    <textarea id="input" placeholder="Message… (Enter to send, Shift+Enter for a newline)" autofocus></textarea>
+    <button id="send" type="submit">Send</button>
+  </form>
+  <div class="hint" id="hint"></div>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const wrap = $('wrap');
+let history = [];
+let busy = false;
+let active = '';
+let servable = [];
+
+// The page is served from the same origin as the API, so relative URLs work and
+// there is no CORS to configure.
+const api = (p) => p;
+
+function tokenHeaders() {
+  const t = sessionStorage.getItem('mlxToken');
+  return t ? { 'Authorization': 'Bearer ' + t } : {};
+}
+
+async function askForToken(why) {
+  const t = prompt(why + '\nBearer token:');
+  if (t) { sessionStorage.setItem('mlxToken', t.trim()); return true; }
+  return false;
+}
+
+function addMsg(role, text = '') {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = '<div class="who"></div>';
+  el.querySelector('.who').textContent = role === 'user' ? 'you' : 'model';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = text;
+  el.appendChild(body);
+  wrap.appendChild(el);
+  $('log').scrollTop = $('log').scrollHeight;
+  return { el, body };
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch(api('/v1/models'), { headers: tokenHeaders() });
+    if (r.status === 401) {
+      if (await askForToken('This server requires authentication.')) return loadModels();
+      $('hint').innerHTML = '<span class="err">Authentication required.</span>';
+      return;
+    }
+    const d = await r.json();
+
+    // /v1/models lists everything in the local cache, but the server can only
+    // answer for the one it loaded at startup. Offering the rest as if they
+    // were selectable just produces 404s, so show them as unavailable instead.
+    try {
+      const a = await (await fetch(api('/_active'))).json();
+      active = a.model || '';
+      servable = a.servable || [];
+    } catch { /* older stack without /_active; fall back to the first entry */ }
+
+    // Three distinct states, because they need three different actions:
+    // loaded (use it), servable but not loaded (restart), and not servable at
+    // all (no restart will help -- pick something else).
+    $('model').innerHTML = '';
+    for (const m of d.data) {
+      const o = document.createElement('option');
+      o.value = m.id;
+      const isActive = !active || m.id === active;
+      const canServe = !servable.length || servable.includes(m.id);
+      o.textContent = isActive ? m.id
+        : m.id + (canServe ? '  (not loaded)' : '  (not supported)');
+      o.disabled = !isActive;
+      if (m.id === active) o.selected = true;
+      $('model').appendChild(o);
+    }
+    const unsupported = d.data.filter(m => servable.length && !servable.includes(m.id)).length;
+    $('hint').textContent = 'Served locally. Nothing in this conversation leaves this machine.'
+      + (unsupported ? `  ${unsupported} cached model(s) cannot be served by this runtime.` : '');
+  } catch (e) {
+    $('hint').innerHTML = '<span class="err">' + describe(e) + '</span>';
+  }
+}
+
+// TypeError from fetch means the connection never happened, which in practice
+// means the stack is not running -- worth saying outright rather than echoing
+// "Failed to fetch".
+function describe(e) {
+  if (e instanceof TypeError) {
+    return 'Cannot reach the server. Is it running?  make up MODEL=12b';
+  }
+  return e.message;
+}
+
+// Split Gemma's thought channel out of the visible answer so reasoning is
+// available but folded away by default.
+function splitThinking(text) {
+  const open = text.indexOf('<|channel>');
+  if (open === -1) return { thought: '', answer: text };
+  const close = text.indexOf('<channel|>', open);
+  if (close === -1) return { thought: text.slice(open + 10), answer: '' };
+  return {
+    thought: text.slice(open + 10, close).replace(/^thought\s*/, ''),
+    answer: text.slice(0, open) + text.slice(close + 10),
+  };
+}
+
+function render(msg, raw) {
+  const { thought, answer } = splitThinking(raw);
+  let det = msg.el.querySelector('details.think');
+  if (thought) {
+    if (!det) {
+      det = document.createElement('details');
+      det.className = 'think';
+      det.innerHTML = '<summary>reasoning</summary><div class="body"></div>';
+      msg.el.insertBefore(det, msg.body);
+    }
+    det.querySelector('.body').textContent = thought.trim();
+  }
+  msg.body.textContent = answer.trim();
+}
+
+async function send(text) {
+  if (busy || !text.trim()) return;
+  busy = true; $('send').disabled = true;
+
+  addMsg('user', text);
+  history.push({ role: 'user', content: text });
+  const msg = addMsg('assistant');
+  const t0 = performance.now();
+
+  const payload = {
+    model: $('model').value,
+    messages: history,
+    max_tokens: Number($('maxTokens').value),
+    temperature: 0.7,
+    stream: true,
+    chat_template_kwargs: { enable_thinking: $('think').checked },
+  };
+
+  let raw = '', tokens = 0;
+  try {
+    const r = await fetch(api('/v1/chat/completions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
+      body: JSON.stringify(payload),
+    });
+    if (r.status === 401) {
+      msg.el.remove(); history.pop();
+      if (await askForToken('Authentication required.')) { busy = false; $('send').disabled = false; return send(text); }
+      throw new Error('unauthorized');
+    }
+    if (r.status === 404) {
+      // Telling someone to restart with a model the runtime cannot load at all
+      // sends them round a loop that cannot end, so say which case this is.
+      if (servable.length && !servable.includes(payload.model)) {
+        throw new Error(`This runtime cannot load "${payload.model}" — restarting will not help. `
+          + 'Servable models: ' + servable.join(', '));
+      }
+      throw new Error(`The server does not have "${payload.model}" loaded. `
+        + 'Restart it with that model: make up MODEL=…');
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (delta) { raw += delta; tokens++; render(msg, raw); $('log').scrollTop = $('log').scrollHeight; }
+        } catch { /* partial frame; the next chunk completes it */ }
+      }
+    }
+    history.push({ role: 'assistant', content: splitThinking(raw).answer.trim() });
+
+    const secs = (performance.now() - t0) / 1000;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${tokens} chunks · ${secs.toFixed(1)}s · ${(tokens / secs).toFixed(1)}/s`;
+    msg.el.appendChild(meta);
+  } catch (e) {
+    msg.body.innerHTML = '<span class="err">' + describe(e) + '</span>';
+  } finally {
+    busy = false; $('send').disabled = false; $('input').focus();
+  }
+}
+
+$('form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = $('input').value;
+  $('input').value = '';
+  send(v);
+});
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); }
+});
+$('input').addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 190) + 'px';
+});
+$('clear').addEventListener('click', () => { history = []; wrap.innerHTML = ''; $('input').focus(); });
+
+loadModels();
+</script>
+</body>
+</html>

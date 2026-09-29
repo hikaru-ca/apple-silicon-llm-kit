@@ -46,14 +46,25 @@ make gen   MODEL=12b PROMPT="Explain LoRA in two sentences."
 Keys are defined in [`configs/models.toml`](configs/models.toml) and resolve to
 `mlx-community` repositories on the Hugging Face Hub.
 
-| Key | Model | Weights | Notes |
-|---|---|---|---|
-| `e2b` | Gemma 4 E2B | ~2.5 GB | Smoke tests |
-| `12b` | Gemma 4 12B | ~8 GB | Everyday default |
-| `12b-qat` | Gemma 4 12B QAT | ~8 GB | Better quality at the same size |
-| `26b-moe` | Gemma 4 26B A4B | ~16 GB | MoE, ~4B active per token |
-| `31b` | Gemma 4 31B | ~19 GB | Flagship dense |
-| `31b-qat` | Gemma 4 31B QAT | ~19 GB | Preferred 31B |
+| Key | Model | Weights | `make up` | Notes |
+|---|---|---|---|---|
+| `e2b` | Gemma 4 E2B | ~2.5 GB | yes | Smoke tests. Too small to trust on facts |
+| `e4b` | Gemma 4 E4B 8-bit | ~9 GB | yes | Community build, not an official one |
+| `12b` | Gemma 4 12B | ~8 GB | **no** | `gemma4_unified`; needs mlx-vlm |
+| `12b-qat` | Gemma 4 12B QAT | ~8 GB | **no** | `gemma4_unified`; needs mlx-vlm |
+| `26b-moe` | Gemma 4 26B A4B | ~16 GB | yes | **Default.** MoE, ~4B active per token |
+| `31b` | Gemma 4 31B | ~19 GB | yes | Flagship dense |
+| `31b-qat` | Gemma 4 31B QAT | ~19 GB | yes | Best quality here |
+
+The two 12B entries are listed because they exist and are worth knowing about,
+not because they work. `mlx-lm` 0.31.3 is the newest release there is, and it
+predates the Gemma 4 12B Unified architecture (June 2026), so `mlx_lm.server`
+cannot load it. `mlx-vlm` can, but is not wired into the server path yet.
+
+This matters more than it looks, because `mlx_lm.server` loads weights lazily:
+an unsupported model starts up, answers `/v1/models`, and only fails when
+someone finally sends a message — as an HTTP 404 that explains nothing.
+`make up` therefore checks `runtime` in the registry and refuses up front.
 
 Sizes are weights only. KV cache grows on top and scales with context length,
 so budget extra headroom before pushing context to six figures.
@@ -63,6 +74,50 @@ Any Hugging Face id or local path also works directly:
 ```bash
 make gen MODEL=mlx-community/gemma-4-e2b-it-4bit
 ```
+
+## Launching a stack
+
+`make up` starts the pieces you ask for and stops them together on Ctrl-C.
+
+```bash
+make up MODEL=e2b                      # web UI + API on loopback, no token
+make up MODEL=31b THINK=on             # bigger model, reasoning on
+make up MODEL=12b UI=0                 # API only, for scripts
+make up MODEL=12b EXPOSE=lan AUTH=1    # reachable from a phone, token required
+```
+
+| Option | Values | Default | Effect |
+|---|---|---|---|
+| `MODEL` | model key or HF id | `12b` | Which weights to load |
+| `THINK` | `on` / `off` | `off` | Gemma thinking mode |
+| `MAX_TOKENS` | integer | `512` | Default generation budget |
+| `UI` | `0` to disable | on | Serve the web page |
+| `AUTH` | `1` to enable | off | Require a bearer token |
+| `EXPOSE` | `loopback` / `lan` | `loopback` | Who can reach it |
+
+The model server always binds to loopback. Anything that needs to be reachable
+from elsewhere goes through the front door instead, so **exposing the stack and
+authenticating it are one decision**: `EXPOSE=lan` turns `AUTH` on by itself,
+and the proxy refuses to start unauthenticated on a non-loopback address. That
+combination is a mistake rather than a preference, so it is rejected instead of
+warned about.
+
+If the weights are missing, the launcher asks before downloading rather than
+silently pulling several gigabytes.
+
+### The web UI
+
+A single self-contained page at `web/index.html`: streaming replies, model
+picker, a per-message thinking toggle, and Gemma's reasoning folded into a
+collapsible block. Conversation history lives in the browser tab and is gone
+when you close it — nothing is written to disk.
+
+It loads no fonts, scripts or styles from any CDN. A local model behind a page
+that phones out for a stylesheet is not actually private, and the page has to
+keep working with the network off.
+
+It is deliberately small. For saved conversations, RAG, multiple users or mixing
+in hosted providers' API keys, put Open WebUI in front of the same API instead.
 
 ## Serving
 

@@ -27,11 +27,14 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import json
+import mimetypes
 import os
 import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 # Headers that describe a single hop and must not be copied between connections.
 HOP_BY_HOP = {
@@ -51,6 +54,13 @@ MAX_BODY = 32 * 1024 * 1024  # Refuse absurd uploads rather than buffering them.
 class AuthProxy(BaseHTTPRequestHandler):
     upstream = "127.0.0.1:8080"
     token = ""
+    require_auth = True
+    web_root: Path | None = None
+    active_model = ""
+    # Models this runtime could serve if restarted. Anything cached but absent
+    # from this list cannot be served at all, which is a different problem from
+    # simply not being loaded right now, and needs different advice.
+    servable: list[str] = []
     protocol_version = "HTTP/1.1"
     server_version = "mlx-auth-proxy"
     sys_version = ""
@@ -58,7 +68,37 @@ class AuthProxy(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
 
+    def _static_path(self) -> Path | None:
+        """Resolve a request to a file under web_root, or None if it is not one.
+
+        Serving the UI from the same origin as the API is what keeps the browser
+        from needing CORS at all. The page itself carries no secrets, so it is
+        readable without a token -- you have to load it before you can type one.
+        """
+        if self.web_root is None or self.command != "GET":
+            return None
+        rel = self.path.split("?", 1)[0].lstrip("/") or "index.html"
+        if rel.startswith("v1/"):
+            return None
+        candidate = (self.web_root / rel).resolve()
+        # Reject anything that escapes the root, however it was spelled.
+        if not candidate.is_file() or self.web_root not in candidate.parents:
+            return None
+        return candidate
+
+    def _serve_static(self, path: Path) -> None:
+        payload = path.read_bytes()
+        ctype, _ = mimetypes.guess_type(path.name)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype or "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _authorized(self) -> bool:
+        if not self.require_auth:
+            return True
         header = self.headers.get("Authorization", "")
         scheme, _, presented = header.partition(" ")
         if scheme.lower() == "bearer" and presented:
@@ -82,6 +122,24 @@ class AuthProxy(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _forward(self) -> None:
+        # mlx_lm.server's /v1/models enumerates everything in the Hugging Face
+        # cache, but it can only answer for the one model it was started with.
+        # A UI built on that list offers choices that 404. Publish which model is
+        # actually loaded so the page can show the difference.
+        if self.command == "GET" and self.path.split("?", 1)[0] == "/_active":
+            payload = json.dumps({"model": self.active_model, "servable": self.servable}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        static = self._static_path()
+        if static is not None:
+            self._serve_static(static)
+            return
+
         if not self._authorized():
             self._deny()
             return
@@ -143,29 +201,65 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--listen", default="127.0.0.1:8443", metavar="HOST:PORT")
     ap.add_argument("--upstream", default="127.0.0.1:8080", metavar="HOST:PORT")
+    ap.add_argument("--web-root", metavar="DIR", help="Also serve this directory at /")
+    ap.add_argument("--active-model", default="", help="Model the upstream actually has loaded")
+    ap.add_argument("--servable", default="", help="Comma-separated ids this runtime can load")
+    ap.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Disable the token check. Only sane on loopback; refused on any other bind.",
+    )
     args = ap.parse_args()
 
-    token = os.environ.get("MLX_API_TOKEN", "").strip()
-    if not token:
-        print(
-            "error: MLX_API_TOKEN is not set.\n"
-            "Refusing to start: an unauthenticated proxy is worse than no proxy,\n"
-            "because it looks protected. Generate one with:\n"
-            "    python3 -c 'import secrets; print(secrets.token_urlsafe(32))'",
-            file=sys.stderr,
-        )
-        return 1
-    if len(token) < 16:
-        print("error: MLX_API_TOKEN is shorter than 16 characters.", file=sys.stderr)
-        return 1
-
     host, _, port = args.listen.rpartition(":")
+    local = host in {"127.0.0.1", "localhost", "::1"}
+
+    if args.no_auth:
+        # Being unauthenticated is fine on loopback and indefensible off it, so
+        # the dangerous combination is rejected rather than merely warned about.
+        if not local:
+            print(
+                f"error: --no-auth with --listen {args.listen} would publish an open\n"
+                "model endpoint to the network. Drop --no-auth, or bind to 127.0.0.1.",
+                file=sys.stderr,
+            )
+            return 1
+        token = ""
+    else:
+        token = os.environ.get("MLX_API_TOKEN", "").strip()
+        if not token:
+            print(
+                "error: MLX_API_TOKEN is not set.\n"
+                "Refusing to start: an unauthenticated proxy is worse than no proxy,\n"
+                "because it looks protected. Generate one with:\n"
+                "    python3 -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
+                "Or pass --no-auth to run without a token on loopback.",
+                file=sys.stderr,
+            )
+            return 1
+        if len(token) < 16:
+            print("error: MLX_API_TOKEN is shorter than 16 characters.", file=sys.stderr)
+            return 1
+
+    if args.web_root:
+        root = Path(args.web_root).resolve()
+        if not (root / "index.html").is_file():
+            print(f"error: no index.html under {root}", file=sys.stderr)
+            return 1
+        AuthProxy.web_root = root
+
     AuthProxy.upstream = args.upstream
     AuthProxy.token = token
+    AuthProxy.require_auth = not args.no_auth
+    AuthProxy.active_model = args.active_model
+    AuthProxy.servable = [s for s in args.servable.split(",") if s]
 
     server = ThreadingHTTPServer((host, int(port)), AuthProxy)
-    print(f"Authenticating proxy on {args.listen} -> {args.upstream}")
-    if host not in {"127.0.0.1", "localhost", "::1"}:
+    mode = "no auth" if args.no_auth else "bearer token"
+    print(f"Front door on {args.listen} -> {args.upstream} ({mode})")
+    if AuthProxy.web_root:
+        print(f"  UI served from {AuthProxy.web_root}")
+    if not local:
         print(f"WARNING: bound to {host}, reachable from the network. Token is sent in plaintext.")
     try:
         server.serve_forever()
