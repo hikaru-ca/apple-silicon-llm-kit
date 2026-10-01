@@ -33,13 +33,43 @@ throughput advantage narrows or reverses past roughly 40K tokens of context.
 ## Quickstart
 
 ```bash
-make setup                  # create .venv and install pinned deps
-make doctor                 # check the machine and print what fits
-make pull  MODEL=12b        # download weights into the HF cache
-make gen   MODEL=12b PROMPT="Explain LoRA in two sentences."
+make setup                      # create .venv and install pinned deps
+make doctor                     # check the machine and print what fits
+make pull MODEL=e2b             # smallest model, ~2.5 GB, for a first run
+make up   MODEL=e2b             # web UI at http://127.0.0.1:8443/
+```
+
+`make up` prints the URL and runs until Ctrl-C. Open the page and type.
+
+Then move to a model worth using — `e2b` is a smoke test and gets facts wrong:
+
+```bash
+make pull    MODEL=31b-qat      # ~19 GB, so not over a tethered connection
+make restart MODEL=31b-qat
+```
+
+For a single answer without a server:
+
+```bash
+make gen MODEL=e2b PROMPT="Explain LoRA in two sentences."
 ```
 
 `make help` lists every target and every model key.
+
+### Everyday commands
+
+| Command | What it does |
+|---|---|
+| `make up MODEL=…` | Start model server, front door and UI |
+| `make down` | Stop them, waiting until the ports are actually free |
+| `make restart MODEL=…` | `down` then `up`, which is what you want when switching models |
+| `make doctor` | What this machine can run |
+| `make check` | Lint, leak scan and dependency-pin check |
+
+Use `make restart` rather than `make down; make up`. A terminated launcher gives
+its children up to ten seconds to exit, so the ports stay bound for a moment
+afterwards and an immediately following `make up` fails on a stack that is
+already gone. `make down` waits for the ports; chaining the two by hand does not.
 
 ## Models
 
@@ -78,22 +108,25 @@ make gen MODEL=mlx-community/gemma-4-e2b-it-4bit
 ## Launching a stack
 
 `make up` starts the pieces you ask for and stops them together on Ctrl-C.
+`make down` stops a stack you started in the background.
 
 ```bash
-make up MODEL=e2b                      # web UI + API on loopback, no token
-make up MODEL=31b THINK=on             # bigger model, reasoning on
-make up MODEL=12b UI=0                 # API only, for scripts
-make up MODEL=12b EXPOSE=lan AUTH=1    # reachable from a phone, token required
+make up MODEL=e2b                         # web UI + API on loopback, no token
+make up MODEL=31b-qat THINK=on            # best model here, reasoning on
+make up MODEL=26b-moe UI=0                # API only, for scripts
+make up MODEL=31b-qat EXPOSE=lan AUTH=1   # reachable from a phone, token required
 ```
 
 | Option | Values | Default | Effect |
 |---|---|---|---|
-| `MODEL` | model key or HF id | `12b` | Which weights to load |
+| `MODEL` | model key or HF id | `26b-moe` | Which weights to load |
 | `THINK` | `on` / `off` | `off` | Gemma thinking mode |
 | `MAX_TOKENS` | integer | `512` | Default generation budget |
 | `UI` | `0` to disable | on | Serve the web page |
 | `AUTH` | `1` to enable | off | Require a bearer token |
 | `EXPOSE` | `loopback` / `lan` | `loopback` | Who can reach it |
+| `PORT` | integer | `8080` | Model server, always loopback |
+| `UI_PORT` | integer | `8443` | Front door: UI and API |
 
 The model server always binds to loopback. Anything that needs to be reachable
 from elsewhere goes through the front door instead, so **exposing the stack and
@@ -112,6 +145,9 @@ picker, a per-message thinking toggle, and Gemma's reasoning folded into a
 collapsible block. Conversation history lives in the browser tab and is gone
 when you close it — nothing is written to disk.
 
+`⌘+Enter` (`Ctrl+Enter` elsewhere) sends; a bare `Enter` inserts a newline, so a
+half-written multi-line prompt cannot be sent by reflex.
+
 It loads no fonts, scripts or styles from any CDN. A local model behind a page
 that phones out for a stylesheet is not actually private, and the page has to
 keep working with the network off.
@@ -122,7 +158,7 @@ in hosted providers' API keys, put Open WebUI in front of the same API instead.
 ## Serving
 
 ```bash
-make serve MODEL=12b PORT=8080
+make serve MODEL=31b-qat PORT=8080
 ```
 
 This exposes an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, which any
@@ -136,26 +172,85 @@ keeps it unreachable from the network. That default is doing all of the work:
 `--host 0.0.0.0` publishes an open model endpoint to everyone on the LAN.
 
 So on loopback, nothing more is needed. To reach it from another device, put the
-bundled proxy in front instead of moving the server off loopback:
+bundled proxy in front instead of moving the server off loopback.
+
+#### Creating the token
+
+There is no account system and no registration: the token is a random string you
+generate and hand to callers.
 
 ```bash
-cp .env.example .env                                  # then generate a token
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-set -a; . ./.env; set +a
-
-make serve                                            # stays on 127.0.0.1:8080
-make serve-auth LISTEN=0.0.0.0:8443                   # authenticated, in another shell
+make token                              # writes .env, mode 0600
+set -a; . ./.env; set +a                # nothing reads .env automatically
+make up MODEL=31b-qat EXPOSE=lan AUTH=1
 ```
 
-Clients then send `Authorization: Bearer <token>` (or `x-api-key`, for
-Anthropic-style clients). Requests without a valid credential get a 401.
-Streaming passes through chunk by chunk, so token-by-token output still works.
+`make token` writes 256 bits from `secrets.token_urlsafe` straight into a file
+created `0600`, rather than leaving it briefly world-readable the way a shell
+redirect would. It refuses to overwrite an existing `.env`; rotate with
+`make token FORCE=1`, then `make restart`.
+
+The second line is the one that is easy to skip, and skipping it is why a token
+can look configured and not be. `.env` is gitignored; `.env.example` is not, so
+never put a real value there.
+
+`EXPOSE=lan` implies `AUTH=1`, so the second flag is belt and braces. The proxy
+refuses to start without `MLX_API_TOKEN`, rather than starting open and looking
+protected.
+
+#### Using the token
+
+The web UI shows a token field in the header when the server answers 401. Paste
+the value, press Enter, and it is kept in `sessionStorage` — per tab, never on
+disk, gone when the tab closes. (An inline field rather than a `prompt()`
+dialog: Chrome refuses those in sandboxed frames and some embedded webviews drop
+them entirely, which made the page look broken rather than merely locked.)
+
+Other clients send it as a header:
+
+```bash
+curl http://<mac-ip>:8443/v1/models -H "Authorization: Bearer $MLX_API_TOKEN"
+```
+
+`x-api-key` is accepted too, for Anthropic-style clients. Requests without a
+valid credential get a 401. Streaming passes through chunk by chunk, so
+token-by-token output still works.
+
+To rotate: generate a new value, replace it in `.env`, and `make restart`.
+There is nothing else holding a copy.
+
+#### What this does and does not protect
 
 The proxy is standard library only — an authentication component is the last
-place to add dependencies. Its limits are deliberate and worth stating plainly:
-the token is sent in plaintext, so this is for a trusted LAN rather than the
-internet; there is one shared token rather than per-user accounts; and there is
-no rate limiting. For anything more exposed, terminate TLS in front of it.
+place to add dependencies. What it gets right, verified rather than assumed:
+
+- **Generation.** 256 bits from `secrets`, a CSPRNG. Not guessable, so the
+  absence of rate limiting does not matter for guessing the token itself.
+- **Comparison.** `hmac.compare_digest`, constant time. A plain `==` leaks the
+  shared prefix through timing and would make the token recoverable byte by byte.
+- **At rest.** `make token` creates `.env` as `0600`. The launcher warns if it
+  finds looser permissions, because the default umask produces `0644` and a
+  token every account on the machine can read is barely a token.
+- **In the process.** Passed by environment, never on the command line, so it
+  does not appear in `ps`.
+- **In logs.** Neither the proxy nor the upstream logs it; the client's
+  `Authorization` header is stripped before forwarding, since the upstream
+  neither needs nor checks it.
+- **In the browser.** `sessionStorage`, so it is per-tab, never written to disk,
+  and gone when the tab closes.
+- **Coverage.** Everything except the page itself is behind the token, including
+  `/_active` — which models are on this machine is not for anonymous callers.
+
+What it does not do, and these are real limits rather than caveats:
+
+- **No TLS.** The token crosses the network in plaintext, so anyone who can
+  observe the traffic — same Wi-Fi, a hostile switch — can take it and replay it.
+  This is for a trusted LAN. For anything more exposed, terminate TLS in front.
+- **No identity.** One shared token answers "is this caller allowed", not "who is
+  this caller". There is no per-user revocation; rotating locks everyone out.
+- **No rate limiting.** Guessing is infeasible, but nothing throttles a flood.
+- **No protection from this machine.** Any process running as you can read
+  `.env` and the environment. The boundary is the network, not the host.
 
 ## Thinking mode
 
@@ -168,8 +263,8 @@ all.
 `THINK` controls it, and defaults to `off`:
 
 ```bash
-make gen MODEL=12b PROMPT="..."            # thinking off
-make gen MODEL=12b PROMPT="..." THINK=on MAX_TOKENS=1500
+make gen MODEL=31b-qat PROMPT="..."            # thinking off
+make gen MODEL=31b-qat PROMPT="..." THINK=on MAX_TOKENS=1500
 ```
 
 Measured on Gemma 4 E2B, identical prompt, `temp 0`:
@@ -200,9 +295,9 @@ quantized weights with no extra flags.
 
 ```bash
 cp examples/sample_train.jsonl data/lora/train.jsonl   # replace with real data
-make lora-train MODEL=12b ITERS=600
-make lora-test  MODEL=12b PROMPT="..."
-make lora-fuse  MODEL=12b                              # standalone merged model
+make lora-train MODEL=26b-moe ITERS=600
+make lora-test  MODEL=26b-moe PROMPT="..."
+make lora-fuse  MODEL=26b-moe                          # standalone merged model
 ```
 
 Defaults (`BATCH_SIZE=4`, `NUM_LAYERS=16`, `--grad-checkpoint`) are sized for a
@@ -220,7 +315,7 @@ Network access is needed only to download weights.
 That claim is checkable rather than merely asserted:
 
 ```bash
-make verify-offline MODEL=12b
+make verify-offline MODEL=e2b
 ```
 
 This runs a generation while polling `lsof` for sockets owned by the process and

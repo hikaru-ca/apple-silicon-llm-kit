@@ -181,6 +181,19 @@ def main() -> int:
         print("note: --expose lan requires authentication; enabling --auth.")
         args.auth = True
 
+    # A token file every account on the machine can read is barely a secret, and
+    # the default umask produces exactly that. Warn rather than fail: the file is
+    # the user's, and the fix is one command.
+    if args.auth:
+        env_file = ROOT / ".env"
+        if env_file.is_file() and env_file.stat().st_mode & 0o077:
+            print(
+                f"warning: {env_file.name} is readable by other accounts "
+                f"({oct(env_file.stat().st_mode & 0o777)}).\n"
+                f"         Fix with: chmod 600 .env",
+                file=sys.stderr,
+            )
+
     if not check_runtime(args.model, models):
         return 1
 

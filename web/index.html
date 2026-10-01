@@ -23,6 +23,9 @@
     }
   }
   * { box-sizing: border-box; }
+  /* `label { display: flex }` below outranks the UA stylesheet's [hidden] rule,
+     so the token field stayed on screen even with the attribute set. */
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.6 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
@@ -86,6 +89,11 @@
   <label>max tokens
     <input type="number" id="maxTokens" value="800" min="32" max="8192" step="32" style="width:74px">
   </label>
+  <!-- Revealed only when the server answers 401. An inline field rather than
+       prompt(), which several browsers refuse to show at all. -->
+  <label id="tokenWrap" hidden>token
+    <input type="password" id="token" placeholder="paste, then Enter" style="width:150px">
+  </label>
   <span class="spacer"></span>
   <button class="ghost" id="clear" type="button">clear</button>
 </header>
@@ -94,7 +102,7 @@
 
 <footer>
   <form id="form">
-    <textarea id="input" placeholder="Message… (Enter to send, Shift+Enter for a newline)" autofocus></textarea>
+    <textarea id="input" autofocus></textarea>
     <button id="send" type="submit">Send</button>
   </form>
   <div class="hint" id="hint"></div>
@@ -103,6 +111,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const wrap = $('wrap');
+
+// Name the modifier the way this platform's users expect to read it.
+const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘+Enter' : 'Ctrl+Enter';
+$('input').placeholder = `Message… (${SEND_KEY} to send, Enter for a newline)`;
+$('send').title = `${SEND_KEY}`;
 let history = [];
 let busy = false;
 let active = '';
@@ -117,11 +130,25 @@ function tokenHeaders() {
   return t ? { 'Authorization': 'Bearer ' + t } : {};
 }
 
-async function askForToken(why) {
-  const t = prompt(why + '\nBearer token:');
-  if (t) { sessionStorage.setItem('mlxToken', t.trim()); return true; }
-  return false;
+// Reveal the inline token field. prompt() would be simpler but Chrome refuses
+// it in sandboxed frames and some embedded webviews drop it entirely, which
+// left the page looking broken rather than merely locked.
+function requireToken(why) {
+  $('tokenWrap').hidden = false;
+  $('hint').innerHTML = '<span class="err">' + why + ' Paste the token above and press Enter.</span>';
+  $('token').focus();
 }
+
+$('token').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const t = $('token').value.trim();
+  if (!t) return;
+  sessionStorage.setItem('mlxToken', t);
+  $('token').value = '';
+  $('tokenWrap').hidden = true;
+  loadModels();
+});
 
 function addMsg(role, text = '') {
   const el = document.createElement('div');
@@ -141,8 +168,7 @@ async function loadModels() {
   try {
     const r = await fetch(api('/v1/models'), { headers: tokenHeaders() });
     if (r.status === 401) {
-      if (await askForToken('This server requires authentication.')) return loadModels();
-      $('hint').innerHTML = '<span class="err">Authentication required.</span>';
+      requireToken('This server requires authentication.');
       return;
     }
     const d = await r.json();
@@ -151,7 +177,7 @@ async function loadModels() {
     // answer for the one it loaded at startup. Offering the rest as if they
     // were selectable just produces 404s, so show them as unavailable instead.
     try {
-      const a = await (await fetch(api('/_active'))).json();
+      const a = await (await fetch(api('/_active'), { headers: tokenHeaders() })).json();
       active = a.model || '';
       servable = a.servable || [];
     } catch { /* older stack without /_active; fall back to the first entry */ }
@@ -243,9 +269,13 @@ async function send(text) {
       body: JSON.stringify(payload),
     });
     if (r.status === 401) {
-      msg.el.remove(); history.pop();
-      if (await askForToken('Authentication required.')) { busy = false; $('send').disabled = false; return send(text); }
-      throw new Error('unauthorized');
+      msg.el.remove();
+      history.pop();
+      $('input').value = text;  // Don't make them retype it after authenticating.
+      requireToken('The token was missing or rejected.');
+      busy = false;
+      $('send').disabled = false;
+      return;
     }
     if (r.status === 404) {
       // Telling someone to restart with a model the runtime cannot load at all
@@ -298,8 +328,10 @@ $('form').addEventListener('submit', (e) => {
   $('input').value = '';
   send(v);
 });
+// Send on Cmd/Ctrl+Enter, not on Enter alone. A bare Enter inserts a newline,
+// so a half-finished multi-line prompt cannot be sent by reflex.
 $('input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('form').requestSubmit(); }
 });
 $('input').addEventListener('input', function () {
   this.style.height = 'auto';

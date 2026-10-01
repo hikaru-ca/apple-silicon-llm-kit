@@ -122,19 +122,9 @@ class AuthProxy(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _forward(self) -> None:
-        # mlx_lm.server's /v1/models enumerates everything in the Hugging Face
-        # cache, but it can only answer for the one model it was started with.
-        # A UI built on that list offers choices that 404. Publish which model is
-        # actually loaded so the page can show the difference.
-        if self.command == "GET" and self.path.split("?", 1)[0] == "/_active":
-            payload = json.dumps({"model": self.active_model, "servable": self.servable}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-
+        # The page itself is served without a credential -- you have to load it
+        # before you can type one -- and it carries no secrets. Everything else,
+        # including /_active, is behind the token.
         static = self._static_path()
         if static is not None:
             self._serve_static(static)
@@ -142,6 +132,21 @@ class AuthProxy(BaseHTTPRequestHandler):
 
         if not self._authorized():
             self._deny()
+            return
+
+        # mlx_lm.server's /v1/models enumerates everything in the Hugging Face
+        # cache, but it can only answer for the one model it was started with.
+        # A UI built on that list offers choices that 404. Publish which model is
+        # actually loaded so the page can show the difference. Authenticated:
+        # which models are on this machine is not something to hand to an
+        # anonymous caller on the LAN.
+        if self.command == "GET" and self.path.split("?", 1)[0] == "/_active":
+            payload = json.dumps({"model": self.active_model, "servable": self.servable}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
 
         length = int(self.headers.get("Content-Length") or 0)

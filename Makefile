@@ -8,6 +8,7 @@ MODEL       ?= 26b-moe
 PROMPT      ?= Explain unified memory on Apple silicon in two sentences.
 MAX_TOKENS  ?= 512
 PORT        ?= 8080
+UI_PORT     ?= 8443
 
 # Thinking mode. Off by default: it costs several times the tokens and adds no
 # quality on summarization, translation, extraction or classification. Turn it
@@ -80,15 +81,30 @@ serve: ## Start an OpenAI-compatible server on localhost
 		--chat-template-args '$(THINK_JSON)'
 
 .PHONY: up
-up: ## Launch the stack: make up MODEL=12b [THINK=on] [EXPOSE=lan] [AUTH=1] [UI=0]
+up: ## Launch the stack: make up MODEL=31b-qat [THINK=on] [EXPOSE=lan] [AUTH=1] [UI=0]
 	$(RUN) python scripts/launch.py \
 		--model $(MODEL) \
 		--think $(THINK) \
 		--max-tokens $(MAX_TOKENS) \
 		--expose $(or $(EXPOSE),loopback) \
 		--port $(PORT) \
+		--ui-port $(UI_PORT) \
 		$(if $(AUTH),--auth,--no-auth) \
 		$(if $(filter 0,$(UI)),--no-ui,--ui)
+
+.PHONY: token
+token: ## Generate a token into .env with 0600 permissions (FORCE=1 to rotate)
+	@if [ -f .env ] && [ -z "$(FORCE)" ]; then \
+		echo "error: .env already exists. Rotate with: make token FORCE=1"; exit 1; fi
+	@# 0600 from the start: a shell redirect would create it 0644 first, leaving
+	@# the token world-readable for the moment in between.
+	@python3 -c 'import os, pathlib, secrets; \
+p = pathlib.Path(".env"); \
+fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); \
+os.write(fd, f"MLX_API_TOKEN={secrets.token_urlsafe(32)}\n".encode()); \
+os.close(fd); os.chmod(p, 0o600)'
+	@ls -l .env | awk '{print "Wrote .env (" $$1 ")"}'
+	@echo 'Load it into this shell:  set -a; . ./.env; set +a'
 
 .PHONY: down
 down: ## Stop a running stack and wait for its ports to be released
@@ -97,7 +113,7 @@ down: ## Stop a running stack and wait for its ports to be released
 	@# stay bound for a moment. Returning before they are free makes an
 	@# immediately following `make up` fail on a stack that is already gone.
 	@for i in $$(seq 1 20); do \
-		if ! lsof -nP -iTCP:$(PORT),$(or $(UI_PORT),8443) -sTCP:LISTEN >/dev/null 2>&1; then \
+		if ! lsof -nP -iTCP:$(PORT),$(UI_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 			echo "Stopped."; exit 0; \
 		fi; \
 		sleep 0.5; \
