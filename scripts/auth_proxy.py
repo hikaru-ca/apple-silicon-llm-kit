@@ -180,7 +180,12 @@ class AuthProxy(BaseHTTPRequestHandler):
                 # buffering here would defeat token-by-token streaming.
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
-                while chunk := resp.read(8192):
+                # read1, not read: read(n) blocks until it has n bytes, so a
+                # token-sized SSE frame waits for 8 KB of company before being
+                # forwarded. Measured, that turned a steady 52 ms cadence into
+                # silences over a second long followed by a burst. read1 returns
+                # whatever one underlying read yields.
+                while chunk := resp.read1(8192):
                     self.wfile.write(f"{len(chunk):X}\r\n".encode())
                     self.wfile.write(chunk)
                     self.wfile.write(b"\r\n")
